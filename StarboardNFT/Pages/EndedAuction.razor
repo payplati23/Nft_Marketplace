@@ -1,0 +1,363 @@
+﻿@page "/endedauction/{auctionId}"
+
+@using StarboardNFT.Data;
+@using StarboardNFT.Models;
+@using StarboardNFTLibrary.Contracts.StarboardNFT.ContractDefinition;
+@using StarboardNFTLibrary.Contracts.StarboardNFT;
+@using StarboardNFTLibrary.Contracts.StarboardNFTMarket.ContractDefinition
+@using StarboardNFTLibrary.Contracts.StarboardNFTMarket;
+@using StarboardNFTLibrary.Contracts.StarboardNFT1155.ContractDefinition;
+@using StarboardNFTLibrary.Contracts.StarboardNFT1155;
+@using Nethereum.Web3;
+@using Nethereum.UI;
+@using Nethereum.Metamask;
+@using Nethereum.RPC.Eth.DTOs;
+@using Nethereum.BlockchainProcessing.Processor;
+@using System.Collections.Generic;
+@using System.Threading;
+@using System.Threading.Tasks;
+@using Nethereum.Web3.Accounts;
+@using System.Numerics;
+@using Ipfs;
+@using Nethereum.Contracts;
+
+
+@inject NotificationService NotificationService
+@inject Blazored.SessionStorage.ISessionStorageService sessionStorage;
+@inject Blazored.LocalStorage.ILocalStorageService localStore
+@inject NavigationManager NavigationManager
+@inject IJSRuntime jsRuntime;
+@inject DialogService DialogService;
+@inject ProfileService ProfileService;
+@inject ActivityService ActivityService;
+
+@inherits OwningComponentBase<AuctionService>
+@using Microsoft.AspNetCore.SignalR.Client
+@using Newtonsoft.Json;
+@inject IEthereumHostProvider _metamaskUIHostProvider;
+@inject MetamaskHostProvider _metamaskHostProvider;
+@inject Microsoft.Extensions.Configuration.IConfiguration config;
+
+
+
+<main>
+    <div class="container">
+        <div class="row">
+            <div class="col-6">
+                @if (auction.NFTData != null)
+                {
+                    <img src="data:image/gif;base64,@System.Convert.ToBase64String(auction.NFTData.NFT.FileContent)" class="w-100 h-auto">
+                    <RadzenLabel Text="@auction.NFTData.NFT.Title" Style="margin-left: 15px;" Component="CheckBox1" />
+                }
+            </div>
+            <div class="col-6 pl-5 pt-5">
+                <div class="row">
+                    @if (auction.NFTData != null)
+                    {
+                        <RadzenLabel Text="@("Ended Date : " + auction.NFTData.SaleEndtDate.ToString())" Style="margin-left: 15px;" Component="CheckBox1" />
+                    }
+                </div>
+                <div class="row">
+                    @if (auction.NFTData != null)
+                    {
+                        <p class="text-center">
+                            <RadzenLabel Text="@("Winning bid : " + auction.CurrentBidPrice.ToString())" Style="margin-left: 15px;" Component="CheckBox1" />
+                            [<a @onclick="OnBidHistory" style="cursor: pointer;">@bidCount bids</a>]
+                        </p>
+                    }
+                </div>
+                <div class="row">
+                    @if (auction.NFTData != null)
+                    {
+                        <RadzenLabel Text="@("Seller : " + auction.NFTData.NFT.UserProfile.UserProfileHeader.UserName)" Style="margin-left: 15px;" Component="CheckBox1" />
+                    }
+                </div>
+                @if (@IsWinningUser == true)
+                {<div class="row">
+                        <RadzenLabel Text="@("You won on Bidding!      Please purchase this item: ")" Style="margin-left: 15px;" Component="CheckBox1" />
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 col-6 text-left">
+                            <button @onclick="OnPurchase" disabled="@isLoading"  style="cursor: pointer; margin-left: 10px;" class="btn btn-primary rounded-0 px-md-4">Purchase</button>
+                        </div>
+                    </div>
+                }
+            </div>
+
+        </div>
+    </div>
+</main>
+
+@code {
+    [Parameter]
+    public string auctionId { get; set; }
+    public int bidCount { get; set; }
+    public BigInteger price { get; set; }
+    public int amount { get; set; }
+    public bool IsWinningUser { get; set; }
+    public string infuraUrl { get; set; }
+    public bool isLoading { get; set; }
+
+    IEnumerable<AuctionBid> AuctionBidList;
+    Auction auction = new Auction();
+
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            var profileheader_Id = await localStore.GetItemAsync<Guid>("headerId");
+
+            if (profileheader_Id == Guid.Empty)
+            {
+                NavigationManager.NavigateTo("signin");
+                return;
+            }
+
+            var SelectedAccount = await _metamaskHostProvider.EnableProviderAsync();
+
+            if (SelectedAccount == null)
+            {
+                NavigationManager.NavigateTo("signin");
+                return;
+            }
+
+            var marketContractAddress = config.GetSection("ContractSettings")["StarboardMarketContractAddress"].ToString();
+
+            var nftAddress = config.GetSection("ContractSettings")["Starboard721ContractAddress"].ToString();
+
+            string nft1155Address = config.GetSection("ContractSettings")["Starboard1155ContractAddress"].ToString();
+
+            infuraUrl = config.GetSection("ContractSettings")["InfuraURL"].ToString();
+
+            var web3 = await _metamaskHostProvider.GetWeb3Async();
+
+            // Web3 Object for getting fetchData
+            var webThree = new Web3(infuraUrl);
+
+            var starboardNFTMarketService = new StarboardNFTMarketService(webThree, marketContractAddress);
+
+            auction = await Service.GetAuctionById(new Guid(auctionId));
+
+            AuctionBidList = Service.GetBidListByAuctionId(new Guid(auctionId));
+
+            bidCount = AuctionBidList.Count();
+
+            var itemIds = new List<BigInteger>();
+
+            MarketItem singleItem = null;
+
+            try
+            {
+                var marketItemFunction = new FetchMarketItemsFunction()
+                {
+                    FromAddress = SelectedAccount
+                };
+
+
+                var nftdata = await starboardNFTMarketService.FetchMarketItemsQueryAsync(marketItemFunction);
+
+
+                if (nftdata != null)
+                {
+
+                    if (auction.NFTData.NFT.IsMultiple)
+                    {
+                        foreach (MarketItem item in nftdata.ReturnValue1)
+                        {
+                            if (item.TokenId == (BigInteger)auction.NFTData.UniqueNumberOfMintedNFT && item.NftContract == nft1155Address.ToLower())
+                            {
+                                itemIds.Add((BigInteger)item.ItemId);
+                            }
+                        }
+
+                        if (profileheader_Id == auction.CurrentWinningUserId && auction.NFTData.NFT.UserProfile.UserProfileHeaderId != profileheader_Id && itemIds.Count != 0)
+                        {
+                            IsWinningUser = true;
+                        }
+                    }
+                    else
+                    {
+
+                        singleItem = nftdata.ReturnValue1.Where(x => x.TokenId == (BigInteger)auction.NFTData.UniqueNumberOfMintedNFT && x.NftContract == nftAddress.ToLower()).FirstOrDefault();
+                        if (profileheader_Id == auction.CurrentWinningUserId && auction.NFTData.NFT.UserProfile.UserProfileHeaderId != profileheader_Id && singleItem != null)
+                        {
+                            IsWinningUser = true;
+                        }
+
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+
+                StateHasChanged();
+                return;
+            }
+
+
+            StateHasChanged();
+        }
+    }
+
+    private void OnBidHistory()
+    {
+        NavigationManager.NavigateTo("bidhistory/" + auction.Id);
+    }
+
+    private async void OnPurchase()
+    {
+
+        var SelectedAccount = await _metamaskHostProvider.EnableProviderAsync();
+
+        var marketContractAddress = config.GetSection("ContractSettings")["StarboardMarketContractAddress"].ToString();
+
+        var nftAddress = config.GetSection("ContractSettings")["Starboard721ContractAddress"].ToString();
+
+        string nft1155Address = config.GetSection("ContractSettings")["Starboard1155ContractAddress"].ToString();
+
+        var web3 = await _metamaskHostProvider.GetWeb3Async();
+
+        var webThree = new Web3(infuraUrl);
+
+        auction = await Service.GetAuctionById(new Guid(auctionId));
+
+        var starboardNFTMarketService = new StarboardNFTMarketService(web3, marketContractAddress);
+
+        // market service for getting fetching data;
+
+        var fetchNFTMarketService = new StarboardNFTMarketService(webThree, marketContractAddress);
+
+        var starboardNFTService = new StarboardNFTService(web3, nftAddress);
+
+        var itemIds = new List<BigInteger>();
+
+        MarketItem singleItem = null;
+
+        var backToWeiPrice = Nethereum.Web3.Web3.Convert.ToWei(auction.NFTData.EthPurchaseAmount);
+
+        bool isSuccess = false;
+
+        isLoading = true;
+
+        try
+        {
+            var nftdata = await fetchNFTMarketService.FetchMarketItemsQueryAsync();
+
+
+            if (nftdata != null)
+            {
+                if (auction.NFTData.NFT.IsMultiple)
+                {
+                    foreach (MarketItem item in nftdata.ReturnValue1)
+                    {
+                        if (item.TokenId == (BigInteger)auction.NFTData.UniqueNumberOfMintedNFT && item.NftContract == nft1155Address.ToLower())
+                        {
+                            itemIds.Add((BigInteger)item.ItemId);
+                        }
+                    }
+                }
+                else
+                {
+
+                    singleItem = nftdata.ReturnValue1.Where(x => x.TokenId == (BigInteger)auction.NFTData.UniqueNumberOfMintedNFT && x.NftContract == nftAddress.ToLower()).FirstOrDefault();
+
+                }
+
+            }
+            else
+            {
+                ShowNotification(new NotificationMessage { Severity = NotificationSeverity.Error, Summary = "Can't purchase this item", Detail = "MarketItem was not created.", Duration = 4000 });
+                return;
+            }
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine(e);
+            ShowNotification(new NotificationMessage { Severity = NotificationSeverity.Error, Summary = "Error", Detail = "Something Wrong!", Duration = 4000 });
+            StateHasChanged();
+            return;
+        }
+
+        try
+        {
+            if (auction.NFTData.NFT.IsMultiple)
+            {
+
+                if (itemIds.Count == 0)
+                {
+                    ShowNotification(new NotificationMessage { Severity = NotificationSeverity.Error, Summary = "Can't purchase this item", Detail = "You already pushased this item.", Duration = 4000 });
+                    IsWinningUser = false;
+                    return;
+                }
+
+                List<BigInteger> pendingItemsIds = new List<BigInteger>();
+
+                for (var i = 0; i < itemIds.Count; i++)
+                {
+                    if (i < auction.NFTData.NFT.TotalNumberOfMintedNFT)
+                    {
+                        pendingItemsIds.Add(itemIds[i]);
+                    }
+                }
+
+
+
+                var createMultiMarketSaleFunction = new CreateMultiMarketSaleFunction()
+                {
+                    Nft1155Contract = nft1155Address,
+                    TokenId = (BigInteger)auction.NFTData.UniqueNumberOfMintedNFT,
+                    ItemIds = pendingItemsIds,
+                    AmountToSend = backToWeiPrice * auction.NFTData.NFT.TotalNumberOfMintedNFT,
+                    FromAddress = SelectedAccount,
+                    Amount = auction.NFTData.NFT.TotalNumberOfMintedNFT
+                };
+
+
+                var multiBuytransation = await starboardNFTMarketService.CreateMultiMarketSaleRequestAndWaitForReceiptAsync(createMultiMarketSaleFunction);
+
+                isSuccess = await Service.OnPurchase(auction, pendingItemsIds.Count);
+
+            }
+            else
+            {
+                if (singleItem == null)
+                {
+                    ShowNotification(new NotificationMessage { Severity = NotificationSeverity.Error, Summary = "Can't purchase this item", Detail = "You already pushased this item.", Duration = 4000 });
+                    IsWinningUser = false;
+                    return;
+                }
+                var createMarketSaleFunctionMessage = new CreateMarketSaleFunction()
+                {
+                    NftContract = nftAddress,
+                    AmountToSend = backToWeiPrice,
+                    ItemId = singleItem.ItemId,
+                    FromAddress = SelectedAccount
+                };
+
+
+                var BuyTransaction = await starboardNFTMarketService.CreateMarketSaleRequestAndWaitForReceiptAsync(createMarketSaleFunctionMessage);
+
+                isSuccess = await Service.OnPurchase(auction, 1);
+            }
+
+
+            IsWinningUser = isSuccess;
+            isLoading = false;
+            NavigationManager.NavigateTo("portfolio");
+
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine(e);
+            isLoading = false;
+            StateHasChanged();
+            return;
+        }
+    }
+
+    void ShowNotification(NotificationMessage message)
+    {
+        NotificationService.Notify(message);
+    }
+}
